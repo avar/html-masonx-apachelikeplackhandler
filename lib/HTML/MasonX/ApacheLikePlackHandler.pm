@@ -7,44 +7,13 @@
 use strict;
 use warnings;
 
-package HTML::Mason::ApacheHandler;
-
-use vars qw($VERSION);
-# do not change the version number
-$VERSION = 1.69;
-
-
-# PerlAddVar was introduced in mod_perl-1.24
-# Support for modperl2 < 1.999022 was removed due to API changes
-BEGIN
-{
-    if ( $ENV{MOD_PERL} && $ENV{MOD_PERL} =~ /1\.99|2\.0/ )
-    {
-        require mod_perl2;
-    }
-    elsif ( $ENV{MOD_PERL} )
-    {
-        require mod_perl;
-    }
-
-    my $mpver = (mod_perl2->VERSION || mod_perl->VERSION || 0);
-
-    # This is the version that introduced PerlAddVar
-    if ($mpver && $mpver < 1.24)
-    {
-        die "mod_perl VERSION >= 1.24 required";
-    }
-    elsif ($mpver >= 1.99 && $mpver < 1.999022)
-    {
-        die "mod_perl-1.99 is not supported; upgrade to 2.00";
-    }
-}
+package HTML::MasonX::ApacheLikePlackHandler;
 
 #----------------------------------------------------------------------
 #
 # APACHE-SPECIFIC REQUEST OBJECT
 #
-package HTML::Mason::Request::ApacheHandler;
+package HTML::MasonX::Request::ApacheLikePlackHandler;
 
 use HTML::Mason::Request;
 use Class::Container;
@@ -55,23 +24,38 @@ use base qw(HTML::Mason::Request);
 
 use HTML::Mason::Exceptions( abbr => [qw(param_error error)] );
 
-use constant APACHE2    => ($mod_perl2::VERSION || $mod_perl::VERSION || 0) >= 1.999022;
 use constant OK         => 0;
 use constant HTTP_OK    => 200;
 use constant DECLINED   => -1;
 use constant NOT_FOUND  => 404;
 use constant REDIRECT   => 302;
 
+my $APACHE2_REQUEST_CLASS;
+my $APACHE2_REQUEST_INSTANCE_CLASS;
+my $APACHE2_STATUS_CLASS;
+my $APACHE2_SERVERUTIL_CLASS;
+BEGIN {
+    my %_name_to_var = (
+        APACHE2_REQUEST          => \$APACHE2_REQUEST_CLASS,
+        APACHE2_REQUEST_INSTANCE => \$APACHE2_REQUEST_INSTANCE_CLASS,
+        APACHE2_STATUS           => \$APACHE2_STATUS_CLASS,
+        APACHE2_SERVERUTIL       => \$APACHE2_SERVERUTIL_CLASS,
+    );
+
+    for my $key (keys %_name_to_var) {
+        my $env_name = sprintf 'HTML_MASONX_APACHELIKEPLACKHANDLER_MOCK_%s_CLASS', $key;
+        ${$_name_to_var{$key}} = $ENV{$env_name} || die "You need to set \$ENV{$env_name} to a mock class";
+    }
+}
+
 BEGIN
 {
-    my $ap_req_class = APACHE2 ? 'Apache2::RequestRec' : 'Apache';
-
     __PACKAGE__->valid_params
-        ( ah         => { isa => 'HTML::Mason::ApacheHandler',
+        ( ah         => { isa => 'HTML::MasonX::ApacheLikePlackHandler',
                           descr => 'An ApacheHandler to handle web requests',
                           public => 0 },
 
-          apache_req => { isa => $ap_req_class, default => undef,
+          apache_req => { isa => $APACHE2_REQUEST_INSTANCE_CLASS, default => undef,
                           descr => "An Apache request object",
                           public => 0 },
 
@@ -168,19 +152,6 @@ sub exec
         $retval = $self->SUPER::exec(@_);
     }
 
-    # On a success code, send headers if they have not been sent and
-    # if we are the top-level request. Since the out_method sends
-    # headers, this will typically only apply after $m->abort.
-    # On an error code, leave it to Apache to send the headers.
-    if (    !$self->is_subrequest
-         and !APACHE2
-         and $self->auto_send_headers
-         and !$r->notes('mason-sent-headers')
-         and ( !$retval or $retval eq HTTP_OK ) ) {
-
-        $r->send_http_header();
-    }
-
     # mod_perl 1 treats HTTP_OK and OK the same, but mod_perl-2 does not.
     return defined $retval && $retval ne HTTP_OK ? $retval : OK;
 }
@@ -198,10 +169,6 @@ sub _handle_error
     } else {
         if ( $self->error_format eq 'html' ) {
             $self->apache_req->content_type('text/html');
-
-            unless (APACHE2) {
-                $self->apache_req->send_http_header;
-            }
         }
         $self->SUPER::_handle_error($err);
     }
@@ -222,7 +189,7 @@ sub redirect
 #
 # APACHEHANDLER OBJECT
 #
-package HTML::Mason::ApacheHandler;
+package HTML::MasonX::ApacheLikePlackHandler;
 
 use File::Path;
 use File::Spec;
@@ -233,42 +200,11 @@ use HTML::Mason::Utils;
 use Params::Validate qw(:all);
 Params::Validate::validation_options( on_fail => sub { param_error( join '', @_ ) } );
 
-use constant APACHE2    => ($mod_perl2::VERSION || $mod_perl::VERSION || 0) >= 1.999022;
 use constant OK         => 0;
 use constant HTTP_OK    => 200;
 use constant DECLINED   => -1;
 use constant NOT_FOUND  => 404;
 use constant REDIRECT   => 302;
-
-BEGIN {
-   if ($ENV{MOD_PERL}) {
-        if (APACHE2) {
-            require Apache2::RequestRec;
-            require Apache2::RequestIO;
-            require Apache2::ServerUtil;
-            require Apache2::RequestUtil;
-            require Apache2::Log;
-            require APR::Table;
-        } else {
-            require Apache;
-            require Apache::Request;
-            require HTML::Mason::Apache::Request;
-            Apache->import();
-        }
-    }
-}
-
-if ( $ENV{MOD_PERL} && ! APACHE2 )
-{
-    # No modern distro/OS packages a mod_perl without all of this
-    # stuff turned on, does it?
-
-    error "mod_perl must be compiled with PERL_METHOD_HANDLERS=1 (or EVERYTHING=1) to use ", __PACKAGE__, "\n"
-        unless Apache::perl_hook('MethodHandlers');
-
-    error "mod_perl must be compiled with PERL_TABLE_API=1 (or EVERYTHING=1) to use ", __PACKAGE__, "\n"
-        unless Apache::perl_hook('TableApi');
-}
 
 use base qw(HTML::Mason::Handler);
 
@@ -282,7 +218,7 @@ BEGIN
 
          args_method =>
          { parse => 'string',  type => SCALAR,
-           default => APACHE2 ? 'CGI' : 'mod_perl',
+           default => 'CGI',
            regex => qr/^(?:CGI|mod_perl)$/,
            descr => "Whether to use CGI.pm or Apache::Request for parsing the incoming HTTP request",
          },
@@ -316,7 +252,7 @@ use HTML::Mason::MethodMaker
 
 sub _get_apache_server
 {
-        return APACHE2 ? Apache2::ServerUtil->server() : Apache->server();
+        return $APACHE2_SERVERUTIL_CLASS->server();
 }
 
 my ($STARTED);
@@ -335,14 +271,14 @@ sub _startup
         {
             eval { require CGI unless defined CGI->VERSION; };
             # mod_perl2 does not warn about this, so somebody should
-            if (APACHE2 && CGI->VERSION < 3.08) {
+            if (CGI->VERSION < 3.08) {
                 die "CGI version 3.08 is required to support mod_perl2 API";
             }
             die $@ if $@;
         }
-        elsif ( $args_method eq 'mod_perl' && APACHE2 )
+        elsif ( $args_method eq 'mod_perl' )
         {
-            eval "require Apache2::Request" unless defined Apache2::Request->VERSION;
+            eval "require $APACHE2_REQUEST_CLASS" unless defined $APACHE2_REQUEST_CLASS->VERSION;
         }
     }
 }
@@ -350,10 +286,9 @@ sub _startup
 # Register with Apache::Status at module startup.  Will get replaced
 # with a more informative status once an interpreter has been created.
 my $status_name = 'mason0001';
-my $apstat_module = APACHE2 ? 'Apache2::Status' : 'Apache::Status';
-if ( load_pkg($apstat_module) )
+if ( load_pkg($APACHE2_STATUS_CLASS) )
 {
-    $apstat_module->menu_item
+    $APACHE2_STATUS_CLASS->menu_item
         ($status_name => __PACKAGE__->allowed_params->{apache_status_title}{default},
          sub { ["<b>(no interpreters created in this child yet)</b>"] });
 }
@@ -584,13 +519,13 @@ sub new
     my %params = @_;
 
     my %defaults;
-    $defaults{request_class}  = 'HTML::Mason::Request::ApacheHandler'
+    $defaults{request_class}  = 'HTML::MasonX::Request::ApacheLikePlackHandler'
         unless exists $params{request};
 
     my $allowed_params = $class->allowed_params(%defaults, %params);
 
     if ( exists $allowed_params->{comp_root} and
-         my $req = $r || (APACHE2 ? undef : Apache->request) )  # DocumentRoot is only available inside requests
+         my $req = $r )  # DocumentRoot is only available inside requests
     {
         $defaults{comp_root} = $req->document_root;
     }
@@ -598,8 +533,9 @@ sub new
     if (exists $allowed_params->{data_dir} and not exists $params{data_dir})
     {
         # constructs path to <server root>/mason
-        if (UNIVERSAL::can('Apache2::ServerUtil','server_root')) {
-                $defaults{data_dir} = File::Spec->catdir(Apache2::ServerUtil::server_root(),'mason');
+        if (UNIVERSAL::can($APACHE2_SERVERUTIL_CLASS,'server_root')) {
+                no strict 'refs';
+                $defaults{data_dir} = File::Spec->catdir(&{"$APACHE2_SERVERUTIL_CLASS\::server_root"}(),'mason');
         } else {
                 $defaults{data_dir} = Apache->server_root_relative('mason');
         }
@@ -661,11 +597,9 @@ sub new
 
 sub get_uid_gid
 {
-    return (Apache->server->uid, Apache->server->gid) unless APACHE2;
-
     # Apache2 lacks $s->uid.
     # Workaround by searching the config tree.
-    require Apache2::Directive;
+    die "The wrapper layer using the Apache2::Directive class is unimplemented";
 
     my $conftree = Apache2::Directive::conftree();
     my $user = $conftree->lookup('User');
@@ -683,13 +617,12 @@ sub get_uid_gid
 sub _initialize {
     my ($self) = @_;
 
-    my $apreq_module = APACHE2 ? 'Apache2::Request' : 'Apache::Request';
     if ($self->args_method eq 'mod_perl') {
-        unless (defined $apreq_module->VERSION) {
-            warn "Loading $apreq_module at runtime.  You could " .
+        unless (defined $APACHE2_REQUEST_CLASS->VERSION) {
+            warn "Loading $APACHE2_REQUEST_CLASS at runtime.  You could " .
                  "increase shared memory between Apache processes by ".
                  "preloading it in your httpd.conf or handler.pl file\n";
-            eval "require $apreq_module";
+            eval "require $APACHE2_REQUEST_CLASS";
         }
     } else {
         unless (defined CGI->VERSION) {
@@ -702,8 +635,7 @@ sub _initialize {
     }
 
     # Add an HTML::Mason menu item to the /perl-status page.
-    my $apstat_module = APACHE2 ? 'Apache2::Status' : 'Apache::Status';
-    if (defined $apstat_module->VERSION) {
+    if (defined $APACHE2_STATUS_CLASS->VERSION) {
         # A closure, carries a reference to $self
         my $statsub = sub {
             my ($r,$q) = @_; # request and CGI objects
@@ -718,7 +650,7 @@ sub _initialize {
                     $self->interp->status_as_html(ah => $self, apache_req => $r)];
         };
         local $^W = 0; # to avoid subroutine redefined warnings
-        $apstat_module->menu_item($status_name, $self->apache_status_title, $statsub);
+        $APACHE2_STATUS_CLASS->menu_item($status_name, $self->apache_status_title, $statsub);
     }
 
     my $interp = $self->interp;
@@ -884,10 +816,8 @@ sub prepare_request
                        rethrow_exception $err );
         $retval = OK if defined $retval && $retval eq HTTP_OK;
         unless ($retval) {
-            unless (APACHE2) {
-                unless ($r->notes('mason-sent-headers')) {
-                    $r->send_http_header();
-                }
+            unless ($r->notes('mason-sent-headers')) {
+                $r->send_http_header();
             }
         }
         return $retval;
@@ -908,7 +838,7 @@ sub _apache_request_object
 
     # We need to be careful to never assign a new apache (subclass)
     # object to $r or we will leak memory, at least with mp1.
-    my $new_r = APACHE2 ? $_[0] : HTML::Mason::Apache::Request->new( $_[0] );
+    my $new_r = $_[0];
 
     my $r_sub;
     my $filter = $_[0]->dir_config('Filter');
@@ -925,9 +855,7 @@ sub _apache_request_object
     }
 
     my $apreq_instance =
-          APACHE2
-        ? sub { Apache2::Request->new( $_[0] ) }
-        : sub { $_[0] };
+        sub { $APACHE2_REQUEST_CLASS->new( $_[0] ) };
 
     return
         $r_sub->( $self->args_method eq 'mod_perl' ?
@@ -1013,35 +941,12 @@ sub _set_mason_req_out_method
     # Craft the request's out method to handle http headers, content
     # length, and HEAD requests.
     my $out_method;
-    if (APACHE2) {
-
+    {
         # mod_perl-2 does not need to call $r->send_http_headers
         $out_method = sub {
             $r->$final_output_method( grep { defined } @_ );
             $r->rflush;
         };
-
-    } else {
-
-        my $sent_headers = 0;
-        $out_method = sub {
-
-            # Send headers if they have not been sent by us or by user.
-            # We use instance here because if we store $m we get a
-            # circular reference and a big memory leak.
-            if (!$sent_headers and HTML::Mason::Request->instance->auto_send_headers) {
-                unless ($r->notes('mason-sent-headers')) {
-                    $r->send_http_header();
-                }
-                $sent_headers = 1;
-            }
-
-            # Call $r->print (using the real Apache method, not our
-            # overridden method).
-            $r->$final_output_method( grep {defined} @_ );
-            $r->rflush;
-        };
-
     }
 
     $m->out_method($out_method);
@@ -1060,12 +965,12 @@ sub return_not_found
 }
 
 #
-# PerlHandler HTML::Mason::ApacheHandler
+# PerlHandler HTML::MasonX::ApacheLikePlackHandler
 #
 BEGIN
 {
     # A method handler is prototyped differently in mod_perl 1.x than in 2.x
-    my $handler_code = sprintf <<'EOF', APACHE2 ? ': method' : '($$)';
+    my $handler_code = sprintf <<'EOF', ': method'; # XXX
 sub handler %s
 {
     my ($package, $r) = @_;
@@ -1084,144 +989,252 @@ EOF
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
-HTML::Mason::ApacheHandler - Mason/mod_perl interface
+HTML::MasonX::ApacheLikePlackHandler - An evil mod_perl-like Mason handler under L<Plack>
 
 =head1 SYNOPSIS
 
-    use HTML::Mason::ApacheHandler;
-
-    my $ah = HTML::Mason::ApacheHandler->new (..name/value params..);
-    ...
-    sub handler {
-        my $r = shift;
-        $ah->handle_request($r);
-    }
+    # Configure HTML::MasonX::ApacheLikePlackHandler to use
+    # our mock classes instead of Apache2::$WHATEVER.
+    #
+    # This is horribly ugly but allows us to diverge less
+    # in HTML::MasonX::ApacheLikePlackHandler from the
+    # upstream HTML::Mason::ApacheHandler.
+    local $ENV{HTML_MASONX_APACHELIKEPLACKHANDLER_MOCK_APACHE2_REQUEST_CLASS}          = 'Your::ApacheLikePlackHandler::Compat::Apache2::Request';
+    local $ENV{HTML_MASONX_APACHELIKEPLACKHANDLER_MOCK_APACHE2_REQUEST_INSTANCE_CLASS} = 'Your::Mock::Apache2::Request';
+    local $ENV{HTML_MASONX_APACHELIKEPLACKHANDLER_MOCK_APACHE2_SERVERUTIL_CLASS}       = 'Your::ApacheLikePlackHandler::Compat::Apache2::ServerUtil';
+    local $ENV{HTML_MASONX_APACHELIKEPLACKHANDLER_MOCK_APACHE2_STATUS_CLASS}           = 'Your::ApacheLikePlackHandler::Compat::Apache2::Status';
+    require HTML::MasonX::ApacheLikePlackHandler;
 
 =head1 DESCRIPTION
 
-The ApacheHandler object links Mason to mod_perl (version 1 or 2),
-running components in response to HTTP requests. It is controlled
-primarily through parameters to the new() constructor.
+This is a forked L<HTML::Mason::ApacheHandler> suitable for running
+under L<Plack> with a mock Apache 2 request object that you have to
+provide yourself.
 
-=head1 PARAMETERS TO THE new() CONSTRUCTOR
+This is not a module intended to write new Mason applications under
+Plack, you probably want something like L<HTML::Mason::PlackHandler>
+for that, or better yet if you're writing something new use L<Mason
+2.0|Mason>, or don't use Mason at all.
+
+There's many possible ways to transition a L<HTML::Mason> application
+running under Apache 2 and mod_perl to a Plack stack running outside
+of Apache, but the one I went for for the Booking.com codebase was to:
 
 =over
 
-=item apache_status_title
+=item * Provide a fake Apache Request object
 
-Title that you want this ApacheHandler to appear as under
-Apache::Status.  Default is "HTML::Mason status".  This is useful if
-you create more than one ApacheHandler object and want them all
-visible via Apache::Status.
+This is an object similar to L<Plack::App::FakeApache::Request> (but
+ours is more complete and not open source yet) which basically wraps
+L<Plack::Request> and L<Plack::Response> and provides an API that
+mocks the Apache C<$r> object
 
-=item args_method
+=item * Run existing code written for Apache/mod_perl on Plack
 
-Method to use for unpacking GET and POST arguments. The valid options
-are 'CGI' and 'mod_perl'; these indicate that a C<CGI.pm> or
-C<Apache::Request> object (respectively) will be created for the
-purposes of argument handling.
-
-'mod_perl' is the default under mod_perl-1 and requires that you have 
-installed the C<Apache::Request> package.  Under mod_perl-2, the default
-is 'CGI' because C<Apache2::Request> is still in development.
-
-If args_method is 'mod_perl', the C<$r> global is upgraded to an
-Apache::Request object. This object inherits all Apache methods and
-adds a few of its own, dealing with parameters and file uploads.  See
-C<Apache::Request> for more information.
-
-If the args_method is 'CGI', the Mason request object (C<$m>) will have a
-method called C<cgi_object> available.  This method returns the CGI
-object used for argument processing.
-
-While Mason will load C<Apache::Request> or C<CGI> as needed at runtime, it
-is recommended that you preload the relevant module either in your
-F<httpd.conf> or F<handler.pl> file, as this will save some memory.
-
-=item decline_dirs
-
-True or false, default is true. Indicates whether Mason should decline
-directory requests, leaving Apache to serve up a directory index or a
-C<FORBIDDEN> error as appropriate. See the L<allowing directory requests|HTML::Mason::Admin/allowing directory requests> section of the administrator's manual
-for more information about handling directories with Mason.
-
-=item interp
-
-The interpreter object to associate with this compiler. By default a
-new object of the specified L<interp_class|HTML::Mason::Params/interp_class> will be created.
-
-=item interp_class
-
-The class to use when creating a interpreter. Defaults to
-L<HTML::Mason::Interp|HTML::Mason::Interp>.
+Using the fake Apache Request object above, for easy reverts back &
+forth between running the application on Apache2/mod_perl and
+nginx/uWSGI/Plack without having to change all the application logic
+to use the Plack API instead of the Apache API.
 
 =back
 
-=head1 ACCESSOR METHODS
+When I started trying to convert our Mason apps to
+L<HTML::Mason::PlackHandler> I found various incompatibilities and
+differences in behavior in that module compared to
+L<HTML::Mason::ApacheHandler>. At least one of these L<has since been
+patched by
+GBARR|https://github.com/gbarr/HTML-Mason-PlackHandler/commit/3801966121c731800b72f07bb11471143171ab2e>
+but I wasn't looking forward to finding more.
 
-All of the above properties, except interp_class, have standard accessor
-methods of the same name: no arguments retrieves the value, and one
-argument sets it, except for args_method, which is not settable.  For
-example:
+Rather than having to debug these I just created this module, which is
+just a copy of L<HTML::Mason::ApacheHandler>. By using something
+bug-compatible with L<HTML::Mason::ApacheHandler> I didn't have to
+worry that bugs that were cropping up during the transition were due
+to migrating from this ~1000 line class to Graham Barr entirely
+different L<HTML::Mason::PlackHandler>.
 
-    my $ah = HTML::Mason::ApacheHandler->new;
-    my $decline_dirs = $ah->decline_dirs;
-    $ah->decline_dirs(1);
+This module has the following changes from
+L<HTML::Mason::ApacheHandler>:
 
-=head1 OTHER METHODS
+=over
 
-The ApacheHandler object has a few other publically accessible methods
-that may be of interest to end users.
+=item * Changed the C<$VERSION> number to the version of this distro
 
-=over 4
+=item * C<s/HTML::Mason::ApacheHandler/HTML::MasonX::ApacheLikePlackHandler/g>
 
-=item handle_request ($r)
+=item * C<s/HTML::Mason::Request::ApacheHandler/HTML::MasonX::Request::ApacheLikePlackHandler/g>
 
-This method takes an Apache or Apache::Request object representing a
-request and translates that request into a form Mason can understand.
-Its return value is an Apache status code.
+=item * Removed code that wasn't run when APACHE2 was false.
 
-Passing an Apache::Request object is useful if you want to set
-Apache::Request parameters, such as POST_MAX or DISABLE_UPLOADS.
+I was already running on Apache 1 anyway, and didn't want to bother
+with the Apache 1 parts of this API. So away it goes!
 
-=item prepare_request ($r)
-
-This method takes an Apache object representing a request and returns
-a new Mason request object or an Apache status code.  If it is a
-request object you can manipulate that object as you like, and then
-call the request object's C<exec> method to have it generate output.
-
-If this method returns an Apache status code, that means that it could
-not create a Mason request object.
-
-This method is useful if you would like to have a chance to decline a
-request based on properties of the Mason request object or a component
-object.  For example:
-
-    my $req = $ah->prepare_request($r);
-    # $req must be an Apache status code if it's not an object
-    return $req unless ref($req);
-
-    return DECLINED
-        unless $req->request_comp->source_file =~ /\.html$/;
-
-    $req->exec;
-
-=item request_args ($r)
-
-Given an Apache request object, this method returns a three item list.
-The first item is a hash reference containing the arguments passed by
-the client's request.
-
-The second is an Apache request object.  This is returned for
-backwards compatibility from when this method was responsible for
-turning a plain Apache object into an Apache::Request object.
-
-The third item may be a CGI.pm object or C<undef>, depending on the
-value of the L<args_method|HTML::Mason::Params/args_method> parameter.
+=item * Removed loading of mod_perl libraries
 
 =back
+
+But most importantly: Instead of requiring various Apache2::* modules
+we require that you define
+C<HTML_MASONX_APACHELIKEPLACKHANDLER_MOCK_APACHE2_{REQUEST,REQUEST_INSTANCE,STATUS,SERVERUTIL}_CLASS>
+in C<%ENV> before requiring this module.
+
+Those C<%ENV> entries should be the name of already loaded Perl packages
+implement an API emulating the Apache2 API this package needs. The
+"APACHE2_REQUEST_INSTANCE" variable is a special case though, it's the
+package your request object (implementing the Apache2 API) will be
+blessed into.
+
+This makes for a rather convoluted API, but the goal was to modify the
+upstream code as little as possible, both to avoid accidentally
+introducing bugs, and to make it easier to incorporate future upstream
+patches.
+
+=head1 EXAMPLE
+
+Here's an example of the source of packages you could as the
+C<HTML_MASONX_APACHELIKEPLACKHANDLER_MOCK_*> variables. These are just
+bare-minimal implementations of the Apache API that
+L<HTML::MasonX::ApacheLikePlackHandler> expects uses.
+
+=head2 Fake L<APR::Table> class
+
+    # http://perl.apache.org/docs/2.0/api/APR/Table.html
+    package Your::MasonCompat::APR::Like::Table;
+    use strict;
+    use warnings;
+
+    sub new {
+        my ($class, $table) = @_;
+
+        # XXX: This is very naive, in reality an APR::Table maybe
+        # can't be represented as a hash (multiple values for the same
+        # key?). Or at least we need magic to implement a similar
+        # Tie-interface.
+        bless $table => $class;
+    }
+
+    sub get {
+        my ($self, $key) = @_;
+
+        die "PANIC: Someone's trying to get a key ($key) that we don't have" unless exists $self->{$key};
+
+        if (ref $self->{$key} eq 'ARRAY') {
+            # Our dumb emulation for PerlAddVar without supporting all
+            # of APR::Table.
+            return @{$self->{$key}};
+        } else {
+            return $self->{$key};
+        }
+    }
+
+=head2 HTML_MASONX_APACHELIKEPLACKHANDLER_MOCK_APACHE2_REQUEST_CLASS
+
+You're going to have to use L<Plack::App::FakeApache::Request>, or
+pester me to generalize and open source the version I'm using. See the
+L<description section|/DESCRIPTION>.
+
+=head2 HTML_MASONX_APACHELIKEPLACKHANDLER_MOCK_APACHE2_REQUEST_CLASS
+
+    package Your::ApacheLikePlackHandler::Compat::Apache2::Request;
+    use strict;
+    use warnings;
+    use Scalar::Util qw(blessed);
+
+    # NEEDED because of HTML::MasonX::ApacheLikePlackHandler code that
+    # does $this_pkg->VERSION. We should never need to change this.
+    our $VERSION = 1.2345;
+
+    # This is only used for:
+    #
+    #    sub { Apache2::Request->new( $_[0] ) };
+    #
+    # So just return the original object. The reason for this being
+    # called at all is because the mod_perl 1 API would do something
+    # different
+    sub new {
+        my ($class, $blessed_request_object) = @_;
+
+        die "PANIC: We should only get an already blessed object as an argument"
+            unless blessed($blessed_request_object);
+
+        return $blessed_request_object;
+    }
+
+    # We do nothing except the above in this class from
+    # HTML::MasonX::ApacheLikePlackHandler as of writing this.
+
+=head2 HTML_MASONX_APACHELIKEPLACKHANDLER_MOCK_APACHE2_SERVERUTIL_CLASS
+
+    package Your::ApacheLikePlackHandler::Compat::Apache2::ServerUtil;
+    use strict;
+    use warnings;
+    use Your::WebServerConfiguration qw(
+        PLACK_WEBSERVER_CONFIGURATION_VARIABLES
+    );
+
+    sub server {
+        my $class = shift;
+
+        die "PANIC: We should have no extra arguments to server()" if @_;
+
+        return bless {
+            # So it's obvious where this came from if it turns up somewhere else
+            THIS_IS_A_MOCK_CLASS_FOR_ONE_DIR_CONFIG_CALL => 1337
+        } => $class;
+    }
+
+    sub dir_config {
+        my $self = shift;
+
+        should_have_no_extra_arguments(\@_);
+
+        my %PLACK_WEBSERVER_CONFIGURATION_VARIABLES = PLACK_WEBSERVER_CONFIGURATION_VARIABLES;
+        return Your::MasonCompat::APR::Like::Table->new({
+            # Used by HTML::MasonX::ApacheLikePlackHandler::_startup()
+            # which only requests the MasonArgsMethod.
+            MasonArgsMethod => $PLACK_WEBSERVER_CONFIGURATION_VARIABLES{MasonArgsMethod},
+        });
+    }
+
+    sub server_root {
+        # DO we even support this? Probably not.
+        die "PANIC: We don't support the server_root() function";
+    }
+
+    # We do nothing except the above in this class from
+    # HTML::MasonX::ApacheLikePlackHandler as of writing this.
+
+=head2 HTML_MASONX_APACHELIKEPLACKHANDLER_MOCK_APACHE2_STATUS_CLASS
+
+    package Your::ApacheLikePlackHandler::Compat::Apache2::Status;
+    use strict;
+    use warnings;
+
+    # This package is to mock Apache2::Status which provides a
+    # /perl-status.
+    #
+    # We don't want this, so we just provide a dummy menu_item method
+    # here.
+    #
+    # We *DON'T* set the version because that's what
+    # HTML::MasonX::ApacheLikePlackHandler checks to see if it should
+    # set it up properly later on. Don't do that.
+
+    sub menu_item { return }
+
+    # We do nothing except the above in this class from
+    # HTML::MasonX::ApacheLikePlackHandler as of writing this.
+
+=head1 AUTHOR
+
+Ævar Arnfjörð Bjarmason <avar@cpan.org> is responsible for
+C<HTML::MasonX::ApacheLikePlackHandler>, but as described above it's
+almost exactly the same as derived from
+L<HTML::Mason::ApacheHandler>. Refer to that package for the original
+authorship & copyright.
 
 =cut
