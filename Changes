@@ -2,6 +2,10 @@ Revision history for HTML::MasonX::ApacheLikePlackHandler
 
 {{$NEXT}}
 
+    - Don't eval() the handler() subroutine into existence so it'll
+      have meaningful file/line/subroutine names/numbers in
+      stacktraces.
+
 0.01 2013-09-21 07:28:29
 
     - Initial version

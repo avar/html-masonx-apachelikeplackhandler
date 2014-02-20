@@ -967,11 +967,7 @@ sub return_not_found
 #
 # PerlHandler HTML::MasonX::ApacheLikePlackHandler
 #
-BEGIN
-{
-    # A method handler is prototyped differently in mod_perl 1.x than in 2.x
-    my $handler_code = sprintf <<'EOF', ': method'; # XXX
-sub handler %s
+sub handler
 {
     my ($package, $r) = @_;
 
@@ -979,10 +975,6 @@ sub handler %s
     $ah ||= $package->make_ah($r);
 
     return $ah->handle_request($r);
-}
-EOF
-    eval $handler_code;
-    rethrow_exception $@;
 }
 
 1;
